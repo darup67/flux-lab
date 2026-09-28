@@ -1,0 +1,135 @@
+//@version=5
+// Flux Lab SMC — FluxCharts-style Smart Money Concepts suite
+// Structure (BOS / CHoCH), order blocks, fair value gaps, equal highs/lows,
+// premium/discount zones and confluence buy/sell signals.
+indicator("Flux Lab SMC", overlay = true, max_boxes_count = 200, max_lines_count = 200, max_labels_count = 200)
+
+swingLen   = input.int(5, "Swing length", minval = 2)
+showOB     = input.bool(true, "Order blocks")
+obMax      = input.int(5, "Max active order blocks", minval = 1)
+showFVG    = input.bool(true, "Fair value gaps")
+fvgMinAtr  = input.float(0.2, "Min FVG size (x ATR)", step = 0.05)
+showEQ     = input.bool(true, "Equal highs / lows")
+eqTolAtr   = input.float(0.1, "EQH/EQL tolerance (x ATR)", step = 0.05)
+showPD     = input.bool(true, "Premium / discount")
+showSig    = input.bool(true, "Buy / sell signals")
+bullCol    = input.color(color.new(#089981, 0), "Bull color")
+bearCol    = input.color(color.new(#f23645, 0), "Bear color")
+
+atr = ta.atr(14)
+
+// ---------- swings & structure ----------
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastHigh = na
+var float lastLow  = na
+var int   lastHighBar = na
+var int   lastLowBar  = na
+var bool  hiBroken = true
+var bool  loBroken = true
+var int   trend = 0   // 1 bull, -1 bear
+var float prevHigh = na
+var float prevLow  = na
+
+if not na(ph)
+    prevHigh := lastHigh
+    lastHigh := ph
+    lastHighBar := bar_index - swingLen
+    hiBroken := false
+    if showEQ and not na(prevHigh) and math.abs(ph - prevHigh) <= eqTolAtr * atr
+        label.new(lastHighBar, ph, "EQH", style = label.style_label_down, color = color.new(bearCol, 80), textcolor = bearCol, size = size.tiny)
+if not na(pl)
+    prevLow := lastLow
+    lastLow := pl
+    lastLowBar := bar_index - swingLen
+    loBroken := false
+    if showEQ and not na(prevLow) and math.abs(pl - prevLow) <= eqTolAtr * atr
+        label.new(lastLowBar, pl, "EQL", style = label.style_label_up, color = color.new(bullCol, 80), textcolor = bullCol, size = size.tiny)
+
+bullBreak = not hiBroken and not na(lastHigh) and close > lastHigh
+bearBreak = not loBroken and not na(lastLow)  and close < lastLow
+
+// ---------- order blocks ----------
+var array<box> bullOBs = array.new<box>()
+var array<box> bearOBs = array.new<box>()
+
+f_lastCandle(bool wantBear, int fromBar) =>
+    // most recent opposite-colored candle between the swing and now
+    int idx = na
+    for i = 1 to math.max(1, bar_index - fromBar)
+        if wantBear ? close[i] < open[i] : close[i] > open[i]
+            idx := i
+            break
+    idx
+
+if bullBreak
+    label.new(bar_index, lastHigh, trend == -1 ? "CHoCH" : "BOS", style = label.style_label_down, color = color.new(bullCol, 100), textcolor = bullCol, size = size.small)
+    line.new(lastHighBar, lastHigh, bar_index, lastHigh, color = bullCol, style = line.style_dashed)
+    trend := 1
+    hiBroken := true
+    if showOB
+        i = f_lastCandle(true, lastHighBar)
+        if not na(i)
+            array.push(bullOBs, box.new(bar_index - i, high[i], bar_index + 20, low[i], border_color = bullCol, bgcolor = color.new(bullCol, 85), extend = extend.right))
+            if array.size(bullOBs) > obMax
+                box.delete(array.shift(bullOBs))
+
+if bearBreak
+    label.new(bar_index, lastLow, trend == 1 ? "CHoCH" : "BOS", style = label.style_label_up, color = color.new(bearCol, 100), textcolor = bearCol, size = size.small)
+    line.new(lastLowBar, lastLow, bar_index, lastLow, color = bearCol, style = line.style_dashed)
+    trend := -1
+    loBroken := true
+    if showOB
+        i = f_lastCandle(false, lastLowBar)
+        if not na(i)
+            array.push(bearOBs, box.new(bar_index - i, high[i], bar_index + 20, low[i], border_color = bearCol, bgcolor = color.new(bearCol, 85), extend = extend.right))
+            if array.size(bearOBs) > obMax
+                box.delete(array.shift(bearOBs))
+
+// mitigate (remove) invalidated blocks; detect retests
+bool obBullTouch = false
+bool obBearTouch = false
+if array.size(bullOBs) > 0
+    for j = array.size(bullOBs) - 1 to 0
+        b = array.get(bullOBs, j)
+        if close < box.get_bottom(b)
+            box.delete(b)
+            array.remove(bullOBs, j)
+        else if low <= box.get_top(b) and close > box.get_bottom(b)
+            obBullTouch := true
+if array.size(bearOBs) > 0
+    for j = array.size(bearOBs) - 1 to 0
+        b = array.get(bearOBs, j)
+        if close > box.get_top(b)
+            box.delete(b)
+            array.remove(bearOBs, j)
+        else if high >= box.get_bottom(b) and close < box.get_top(b)
+            obBearTouch := true
+
+// ---------- fair value gaps ----------
+bullFVG = low > high[2] and (low - high[2]) >= fvgMinAtr * atr
+bearFVG = high < low[2] and (low[2] - high) >= fvgMinAtr * atr
+if showFVG and bullFVG
+    box.new(bar_index - 2, low, bar_index + 10, high[2], border_color = na, bgcolor = color.new(bullCol, 80), text = "FVG", text_color = bullCol, text_size = size.tiny)
+if showFVG and bearFVG
+    box.new(bar_index - 2, low[2], bar_index + 10, high, border_color = na, bgcolor = color.new(bearCol, 80), text = "FVG", text_color = bearCol, text_size = size.tiny)
+
+// ---------- premium / discount ----------
+rangeHi = ta.highest(high, 100)
+rangeLo = ta.lowest(low, 100)
+eq = (rangeHi + rangeLo) / 2
+plot(showPD ? eq : na, "Equilibrium", color = color.new(color.gray, 40), style = plot.style_linebr)
+inDiscount = close < eq
+inPremium  = close > eq
+
+// ---------- signals: trend + OB retest + zone ----------
+buySig  = showSig and trend == 1  and obBullTouch and inDiscount and close > open
+sellSig = showSig and trend == -1 and obBearTouch and inPremium  and close < open
+plotshape(buySig,  "Buy",  shape.labelup,   location.belowbar, bullCol, text = "BUY",  textcolor = color.white, size = size.small)
+plotshape(sellSig, "Sell", shape.labeldown, location.abovebar, bearCol, text = "SELL", textcolor = color.white, size = size.small)
+
+alertcondition(bullBreak, "Bullish BOS/CHoCH", "Flux Lab: bullish structure break on {{ticker}}")
+alertcondition(bearBreak, "Bearish BOS/CHoCH", "Flux Lab: bearish structure break on {{ticker}}")
+alertcondition(buySig,  "Flux Buy",  "Flux Lab BUY {{ticker}} @ {{close}}")
+alertcondition(sellSig, "Flux Sell", "Flux Lab SELL {{ticker}} @ {{close}}")
